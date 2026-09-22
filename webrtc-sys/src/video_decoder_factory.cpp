@@ -16,11 +16,14 @@
 
 #include "livekit/video_decoder_factory.h"
 
+#include <atomic>
+
 #include <modules/video_coding/codecs/av1/av1_svc_config.h>
 #include "api/environment/environment.h"
 #include "api/video_codecs/av1_profile.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "livekit/objc_video_factory.h"
+#include "livekit/passthrough_video_decoder.h"
 #include "media/base/media_constants.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
@@ -136,6 +139,21 @@ VideoDecoderFactory::CodecSupport VideoDecoderFactory::QueryCodecSupport(
 
 std::unique_ptr<webrtc::VideoDecoder> VideoDecoderFactory::Create(
     const webrtc::Environment& env, const webrtc::SdpVideoFormat& format) {
+  // ADR 0055: with the process-global flag set, H.264 gets the passthrough
+  // decoder (the native overlay hands the access units to the OS decoder);
+  // every other format (VP8 / VP9 / AV1 / H.265) falls through to the
+  // platform and software decoders below, whose decoded frames reach Rust
+  // through the ordinary NativeVideoStream path.
+  if (livekit_passthrough_decoding_enabled() &&
+      absl::EqualsIgnoreCase(format.name, webrtc::kH264CodecName)) {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+      RTC_LOG(LS_INFO) << "Passthrough decoding enabled; first H.264 format: "
+                       << format.ToString();
+    }
+    return CreatePassthroughVideoDecoder(env, format);
+  }
+
   for (const auto& factory : factories_) {
     for (const auto& supported_format : factory->GetSupportedFormats()) {
       if (supported_format.IsSameCodec(format))
